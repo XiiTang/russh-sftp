@@ -199,6 +199,15 @@ pub struct FileAttributes {
     pub permissions: Option<u32>,
     pub atime: Option<u32>,
     pub mtime: Option<u32>,
+    pub extended: Vec<ExtendedAttribute>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtendedAttribute {
+    #[serde(with = "serde_bytes")]
+    pub kind: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
 }
 
 macro_rules! impl_fn_type {
@@ -295,6 +304,7 @@ impl FileAttributes {
             permissions: Some(0o777 | FileMode::DIR.bits()),
             atime: Some(0),
             mtime: Some(0),
+            extended: Vec::new(),
         }
     }
 }
@@ -333,6 +343,12 @@ impl Serialize for FileAttributes {
     where
         S: serde::Serializer,
     {
+        if self.uid.is_some() != self.gid.is_some() || self.atime.is_some() != self.mtime.is_some()
+        {
+            return Err(serde::ser::Error::custom(
+                "SFTP v3 attribute pairs must both be present",
+            ));
+        }
         let mut attrs = FileAttr::default();
         let mut field_count = 1;
 
@@ -356,6 +372,10 @@ impl Serialize for FileAttributes {
             field_count += 2;
         }
 
+        if !self.extended.is_empty() {
+            attrs |= FileAttr::EXTENDED;
+            field_count += 1;
+        }
         let mut s = serializer.serialize_struct("FileAttributes", field_count)?;
         s.serialize_field("attrs", &attrs)?;
 
@@ -377,7 +397,9 @@ impl Serialize for FileAttributes {
             s.serialize_field("mtime", &self.mtime.unwrap_or(0))?;
         }
 
-        // todo: extended implementation
+        if !self.extended.is_empty() {
+            s.serialize_field("extended", &self.extended)?;
+        }
 
         s.end()
     }
@@ -401,40 +423,53 @@ impl<'de> Deserialize<'de> for FileAttributes {
             where
                 A: serde::de::SeqAccess<'de>,
             {
-                let attrs = FileAttr::from_bits_truncate(seq.next_element::<u32>()?.unwrap_or(0));
+                fn required<'de, A: serde::de::SeqAccess<'de>, T: Deserialize<'de>>(
+                    seq: &mut A,
+                ) -> Result<T, A::Error> {
+                    seq.next_element()?
+                        .ok_or_else(|| serde::de::Error::custom("truncated SFTP attributes"))
+                }
+                let flags = required::<_, u32>(&mut seq)?;
+                let attrs = FileAttr::from_bits(flags)
+                    .ok_or_else(|| serde::de::Error::custom("unknown SFTP attribute flags"))?;
 
                 Ok(FileAttributes {
                     size: if attrs.contains(FileAttr::SIZE) {
-                        seq.next_element::<u64>()?
+                        Some(required::<_, u64>(&mut seq)?)
                     } else {
                         None
                     },
                     uid: if attrs.contains(FileAttr::UIDGID) {
-                        seq.next_element::<u32>()?
+                        Some(required::<_, u32>(&mut seq)?)
                     } else {
                         None
                     },
                     user: None,
                     gid: if attrs.contains(FileAttr::UIDGID) {
-                        seq.next_element::<u32>()?
+                        Some(required::<_, u32>(&mut seq)?)
                     } else {
                         None
                     },
                     group: None,
                     permissions: if attrs.contains(FileAttr::PERMISSIONS) {
-                        seq.next_element::<u32>()?
+                        Some(required::<_, u32>(&mut seq)?)
                     } else {
                         None
                     },
                     atime: if attrs.contains(FileAttr::ACMODTIME) {
-                        seq.next_element::<u32>()?
+                        Some(required::<_, u32>(&mut seq)?)
                     } else {
                         None
                     },
                     mtime: if attrs.contains(FileAttr::ACMODTIME) {
-                        seq.next_element::<u32>()?
+                        Some(required::<_, u32>(&mut seq)?)
                     } else {
                         None
+                    },
+                    extended: if attrs.contains(FileAttr::EXTENDED) {
+                        required(&mut seq)?
+                    } else {
+                        Vec::new()
                     },
                 })
             }

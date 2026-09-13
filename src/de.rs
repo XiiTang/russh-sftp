@@ -213,6 +213,11 @@ impl<'de> serde::Deserializer<'de> for &mut Deserializer<'de> {
         V: serde::de::Visitor<'de>,
     {
         let len = self.input.try_get_u32()? as usize;
+        if len > self.input.remaining() {
+            return Err(Error::BadMessage(
+                "SFTP item count exceeds remaining payload".into(),
+            ));
+        }
         visitor.visit_seq(SeqDeserializer {
             de: self,
             len: Some(len),

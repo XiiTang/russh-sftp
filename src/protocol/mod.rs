@@ -39,7 +39,8 @@ pub use self::{
     extended::{Extended, ExtendedReply},
     file::File,
     file_attrs::{
-        FileAttr, FileAttributes, FileMode, FilePermissionFlags, FilePermissions, FileType,
+        ExtendedAttribute, FileAttr, FileAttributes, FileMode, FilePermissionFlags,
+        FilePermissions, FileType,
     },
     fsetstat::FSetStat,
     fstat::Fstat,
@@ -61,7 +62,7 @@ pub use self::{
     stat::Stat,
     status::{Status, StatusCode},
     symlink::Symlink,
-    version::Version,
+    version::{Extension, Version},
     write::Write,
 };
 
@@ -234,6 +235,9 @@ impl TryFrom<&mut Bytes> for Packet {
             _ => return Err(Error::BadMessage("unknown type".to_owned())),
         };
 
+        if !bytes.is_empty() {
+            return Err(Error::BadMessage("trailing SFTP packet data".into()));
+        }
         Ok(request)
     }
 }

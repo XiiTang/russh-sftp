@@ -7,7 +7,8 @@ use crate::{error::Error, protocol::SSH_FXP_WRITE, ser};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Write {
     pub id: u32,
-    pub handle: String,
+    #[serde(with = "serde_bytes")]
+    pub handle: Vec<u8>,
     pub offset: u64,
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
@@ -19,7 +20,8 @@ impl_packet_for!(Write);
 #[derive(Serialize)]
 pub(crate) struct WriteRef<'a> {
     pub id: u32,
-    pub handle: &'a str,
+    #[serde(with = "serde_bytes")]
+    pub handle: &'a [u8],
     pub offset: u64,
     #[serde(with = "serde_bytes")]
     pub data: &'a [u8],
@@ -43,14 +45,14 @@ mod tests {
             let data = vec![0x5a; size];
             let borrowed = Bytes::try_from(WriteRef {
                 id: 42,
-                handle: "test-handle",
+                handle: b"test-handle",
                 offset: 123_456,
                 data: &data,
             })
             .unwrap();
             let owned = Bytes::try_from(Packet::Write(Write {
                 id: 42,
-                handle: "test-handle".to_owned(),
+                handle: b"test-handle".to_vec(),
                 offset: 123_456,
                 data,
             }))

@@ -46,7 +46,7 @@ pub trait Handler: Sized {
     fn close(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
     ) -> impl Future<Output = Result<Status, Self::Error>> + Send {
         let err = self.unimplemented();
         async { Err(err) }
@@ -57,7 +57,7 @@ pub trait Handler: Sized {
     fn read(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
         offset: u64,
         len: u32,
     ) -> impl Future<Output = Result<Data, Self::Error>> + Send {
@@ -70,7 +70,7 @@ pub trait Handler: Sized {
     fn write(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
         offset: u64,
         data: Vec<u8>,
     ) -> impl Future<Output = Result<Status, Self::Error>> + Send {
@@ -94,7 +94,7 @@ pub trait Handler: Sized {
     fn fstat(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
     ) -> impl Future<Output = Result<Attrs, Self::Error>> + Send {
         let err = self.unimplemented();
         async { Err(err) }
@@ -117,7 +117,7 @@ pub trait Handler: Sized {
     fn fsetstat(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
         attrs: FileAttributes,
     ) -> impl Future<Output = Result<Status, Self::Error>> + Send {
         let err = self.unimplemented();
@@ -141,7 +141,7 @@ pub trait Handler: Sized {
     fn readdir(
         &mut self,
         id: u32,
-        handle: String,
+        handle: Vec<u8>,
     ) -> impl Future<Output = Result<Name, Self::Error>> + Send {
         let err = self.unimplemented();
         async { Err(err) }

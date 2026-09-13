@@ -72,63 +72,105 @@ where
     }
 }
 
-async fn process_handler<S, H>(stream: &mut S, handler: &mut H) -> Result<(), Error>
+async fn process_handler<S, H>(stream: &mut S, handler: &mut H, maximum: u32) -> Result<(), Error>
 where
     S: AsyncRead + Unpin,
     H: Handler + Send,
 {
-    let mut bytes = read_packet(stream, u32::MAX).await?;
+    let mut bytes = read_packet(stream, maximum).await?;
     Ok(execute_handler(&mut bytes, handler).await?)
 }
 
 /// Run processing stream as SFTP client. Is a simple handler of incoming
 /// and outgoing packets. Can be used for non-standard implementations
-pub fn run<S, H>(stream: S, mut handler: H) -> mpsc::UnboundedSender<Bytes>
+pub fn run<S, H>(stream: S, handler: H) -> Driver
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     H: Handler + Send + 'static,
 {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+    run_with_config(stream, handler, &Config::default())
+}
+
+pub struct Driver {
+    tx: mpsc::Sender<Bytes>,
+    stop: CancellationToken,
+    tasks: tokio::sync::Mutex<Vec<runtime::JoinHandle<()>>>,
+}
+impl Driver {
+    pub fn is_closed(&self) -> bool {
+        self.stop.is_cancelled() || self.tx.is_closed()
+    }
+    pub fn send(&self, bytes: Bytes) -> Result<(), error::Error> {
+        self.tx.try_send(bytes).map_err(|_| {
+            error::Error::Limited("SFTP pending output queue is full or closed".into())
+        })
+    }
+    pub fn close(&self) {
+        self.stop.cancel();
+    }
+    pub async fn shutdown(&self) {
+        self.close();
+        for task in std::mem::take(&mut *self.tasks.lock().await) {
+            let _ = task.await;
+        }
+    }
+}
+impl Drop for Driver {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+pub fn run_with_config<S, H>(stream: S, mut handler: H, config: &Config) -> Driver
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: Handler + Send + 'static,
+{
+    let (tx, mut rx) = mpsc::channel::<Bytes>(32);
+    let maximum = config.max_packet_len;
+
     let (mut rd, mut wr) = io::split(stream);
 
     let rc = CancellationToken::new();
     let wc = rc.clone();
-    {
-        runtime::spawn(async move {
-            loop {
-                select! {
-                    result = process_handler(&mut rd, &mut handler) => {
-                        match result {
-                            Err(Error::UnexpectedEof) => break,
-                            Err(err) => {
-                                warn!("{}", err);
-                                break;
-                            },
-                            Ok(_) => (),
-                        }
-                    },
-                    _ = rc.cancelled() => break,
-                }
+    let stop = rc.clone();
+    let reader = runtime::spawn(async move {
+        loop {
+            select! {
+                result = process_handler(&mut rd, &mut handler, maximum) => {
+                    match result {
+                        Err(Error::UnexpectedEof) => break,
+                        Err(err) => {
+                            warn!("{}", err);
+                            break;
+                        },
+                        Ok(_) => (),
+                    }
+                },
+                _ = rc.cancelled() => break,
             }
+        }
 
-            rc.cancel();
-            debug!("read half of sftp stream ended");
-        });
-    }
+        rc.cancel();
+        debug!("read half of sftp stream ended");
+    });
 
-    runtime::spawn(async move {
+    let writer = runtime::spawn(async move {
         loop {
             select! {
                 data = rx.recv() => {
                     let Some(data) = data else { break; };
                     if data.is_empty() {
-                        let _ = wr.shutdown().await;
+                        select! { _ = wr.shutdown() => {}, _ = wc.cancelled() => {} }
                         break;
                     }
 
-                    if let Err(error) = wr.write_all(&data[..]).await {
-                        warn!("{}", error);
-                        break;
+                    select! {
+                        result = wr.write_all(&data[..]) => if let Err(error) = result {
+                            warn!("{}", error);
+                            break;
+                        },
+                        _ = wc.cancelled() => break,
                     }
                 },
                 _ = wc.cancelled() => break,
@@ -139,5 +181,9 @@ where
         debug!("write half of sftp stream ended");
     });
 
-    tx
+    Driver {
+        tx,
+        stop,
+        tasks: tokio::sync::Mutex::new(vec![reader, writer]),
+    }
 }

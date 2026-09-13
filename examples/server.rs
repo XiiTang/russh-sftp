@@ -130,7 +130,7 @@ impl russh_sftp::server::Handler for SftpSession {
         Ok(Version::new())
     }
 
-    async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
+    async fn close(&mut self, id: u32, _handle: Vec<u8>) -> Result<Status, Self::Error> {
         Ok(Status {
             id,
             status_code: StatusCode::Ok,
@@ -142,12 +142,15 @@ impl russh_sftp::server::Handler for SftpSession {
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         info!("opendir: {}", path);
         self.root_dir_read_done = false;
-        Ok(Handle { id, handle: path })
+        Ok(Handle {
+            id,
+            handle: path.into_bytes(),
+        })
     }
 
-    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
-        info!("readdir handle: {}", handle);
-        if handle == "/" && !self.root_dir_read_done {
+    async fn readdir(&mut self, id: u32, handle: Vec<u8>) -> Result<Name, Self::Error> {
+        info!("readdir handle: {:?}", handle);
+        if handle == b"/" && !self.root_dir_read_done {
             self.root_dir_read_done = true;
             return Ok(Name {
                 id,

@@ -54,7 +54,7 @@ impl SftpSession {
         let mut session = RawSftpSession::new_with_config(stream, cfg);
 
         let version = session.init().await?;
-        let has_extension = |name, ver| version.extensions.get(name).is_some_and(|v| v == ver);
+        let has_extension = |name, ver: &str| version.supports(name, ver.as_bytes());
 
         let mut features = Features {
             hardlink: has_extension(extensions::HARDLINK, "1"),
@@ -185,7 +185,7 @@ impl SftpSession {
         let mut files = vec![];
 
         loop {
-            match self.session.readdir(handle.as_str()).await {
+            match self.session.readdir(handle.as_slice()).await {
                 Ok(name) => {
                     files = name
                         .files

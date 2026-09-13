@@ -36,7 +36,8 @@ impl_try_into_bytes!(HardlinkExtension);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FsyncExtension {
-    pub handle: String,
+    #[serde(with = "serde_bytes")]
+    pub handle: Vec<u8>,
 }
 
 impl_try_into_bytes!(FsyncExtension);
@@ -82,3 +83,31 @@ pub struct Statvfs {
     /// The maximum filename length
     pub name_max: u64,
 }
+
+pub const POSIX_RENAME: &str = "posix-rename@openssh.com";
+pub const FSTATVFS: &str = "fstatvfs@openssh.com";
+pub const COPY_DATA: &str = "copy-data";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PosixRenameExtension {
+    pub oldpath: String,
+    pub newpath: String,
+}
+impl_try_into_bytes!(PosixRenameExtension);
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FstatvfsExtension {
+    #[serde(with = "serde_bytes")]
+    pub handle: Vec<u8>,
+}
+impl_try_into_bytes!(FstatvfsExtension);
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CopyDataExtension {
+    #[serde(with = "serde_bytes")]
+    pub read_handle: Vec<u8>,
+    pub read_offset: u64,
+    pub read_length: u64,
+    #[serde(with = "serde_bytes")]
+    pub write_handle: Vec<u8>,
+    pub write_offset: u64,
+}
+impl_try_into_bytes!(CopyDataExtension);
