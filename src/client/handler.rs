@@ -8,6 +8,9 @@ use crate::protocol::{Attrs, Data, ExtendedReply, Handle, Name, Status, Version}
 pub trait Handler: Sized {
     type Error: Into<Error>;
 
+    /// Called once after the first transport termination cause is recorded.
+    fn closed(&mut self, _error: Error) {}
+
     /// Called on SSH_FXP_VERSION.
     #[allow(unused_variables)]
     fn version(

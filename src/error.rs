@@ -1,38 +1,26 @@
 use bytes::TryGetError;
-use std::{fmt, io};
-use thiserror::Error;
+use std::{fmt, io, sync::Arc};
 
 use crate::client;
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum Error {
-    #[error("I/O: {0}")]
-    IO(String),
-    #[error("Unexpected EOF on stream")]
+    IO(Arc<io::Error>),
     UnexpectedEof,
-    #[error("Bad message: {0}")]
     BadMessage(String),
-    #[error("Client error. ({0})")]
-    Client(String),
-    #[error("Unexpected behavior: {0}")]
+    Client(Arc<client::error::Error>),
     UnexpectedBehavior(String),
 }
 
 impl From<client::error::Error> for Error {
     fn from(error: client::error::Error) -> Self {
-        Self::Client(error.to_string())
+        Self::Client(Arc::new(error))
     }
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        let kind = err.kind();
-        let msg = err.into_inner().map_or("".to_string(), |m| format!("{m}"));
-        match kind {
-            io::ErrorKind::UnexpectedEof => Self::UnexpectedEof,
-            io::ErrorKind::Other if msg == "EOF" => Self::UnexpectedEof,
-            e => Self::IO(e.to_string()),
-        }
+        Self::IO(Arc::new(err))
     }
 }
 
@@ -60,5 +48,26 @@ impl serde::de::Error for Error {
         T: fmt::Display,
     {
         Self::BadMessage(msg.to_string())
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IO(v) => write!(f, "I/O: {v}"),
+            Self::UnexpectedEof => f.write_str("Unexpected EOF on stream"),
+            Self::BadMessage(v) => write!(f, "Bad message: {v}"),
+            Self::Client(v) => write!(f, "Client error. ({v})"),
+            Self::UnexpectedBehavior(v) => write!(f, "Unexpected behavior: {v}"),
+        }
+    }
+}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::IO(v) => Some(v.as_ref()),
+            Self::Client(v) => Some(v.as_ref()),
+            _ => None,
+        }
     }
 }

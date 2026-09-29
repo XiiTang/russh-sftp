@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{ready, Context, Poll},
     time::Duration,
@@ -40,6 +40,7 @@ pub(crate) struct Request {
     response: oneshot::Receiver<SftpResult<Packet>>,
     timeout: Pin<Box<dyn Future<Output = SftpResult<()>> + Send + Sync>>,
     completed: bool,
+    terminal: Arc<Mutex<Option<Error>>>,
 }
 
 impl Future for Request {
@@ -48,9 +49,14 @@ impl Future for Request {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Poll::Ready(result) = Pin::new(&mut self.response).poll(cx) {
             self.completed = true;
-            return Poll::Ready(
-                result.unwrap_or_else(|_| Err(Error::UnexpectedBehavior("sender dropped".into()))),
-            );
+            return Poll::Ready(result.unwrap_or_else(|_| {
+                Err(self
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(Error::Closed))
+            }));
         }
 
         let _ = ready!(self.timeout.as_mut().poll(cx));
@@ -112,6 +118,17 @@ impl Drop for SessionInner {
 
 impl Handler for SessionInner {
     type Error = Error;
+
+    fn closed(&mut self, error: Error) {
+        // New registrations either precede the driver's terminal publication
+        // or are refused by send and removed when their Request is dropped.
+        self.requests.retain(|_, sender| {
+            let (replacement, _) = oneshot::channel();
+            let sender = std::mem::replace(sender, replacement);
+            let _ = sender.send(Err(error.clone()));
+            false
+        });
+    }
 
     async fn version(&mut self, packet: Version) -> Result<(), Self::Error> {
         let version = packet.version;
@@ -247,10 +264,6 @@ impl RawSftpSession {
     }
 
     fn send_bytes(&self, id: Option<u32>, bytes: Bytes) -> SftpResult<Request> {
-        if self.tx.is_closed() {
-            return Err(Error::UnexpectedBehavior("session closed".into()));
-        }
-
         if bytes.len().saturating_sub(4) > self.maximum_packet as usize {
             return Err(Error::Limited(
                 "packet exceeds configured transport bound".into(),
@@ -265,12 +278,13 @@ impl RawSftpSession {
         let (tx, rx) = oneshot::channel();
         let timeout = Duration::from_secs(self.timeout.load(Ordering::Relaxed));
         let timeout = runtime::timeout(timeout, std::future::pending());
-        let request = Request {
+        let mut request = Request {
             id,
             requests: self.requests.clone(),
             response: rx,
             timeout: Box::pin(timeout),
-            completed: false,
+            completed: true,
+            terminal: self.tx.terminal.clone(),
         };
         match self.requests.entry(id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
@@ -282,6 +296,7 @@ impl RawSftpSession {
                 ))
             }
         }
+        request.completed = false;
         self.tx.send(bytes)?;
 
         Ok(request)
@@ -307,12 +322,10 @@ impl RawSftpSession {
     /// Closes the inner channel stream. Called by [`Drop`]
     pub fn close_session(&self) -> SftpResult<()> {
         self.tx.close();
-        self.requests.clear();
         Ok(())
     }
     /// Cancel both transport halves and wait until they have released the stream.
     pub async fn shutdown(&self) {
-        self.requests.clear();
         self.tx.shutdown().await;
     }
 

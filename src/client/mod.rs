@@ -10,6 +10,7 @@ pub use rawsession::RawSftpSession;
 pub use session::SftpSession;
 
 use bytes::Bytes;
+use std::sync::{Arc, Mutex};
 use tokio::{
     io::{self, AsyncRead, AsyncWrite, AsyncWriteExt},
     select,
@@ -95,17 +96,33 @@ pub struct Driver {
     tx: mpsc::Sender<Bytes>,
     stop: CancellationToken,
     tasks: tokio::sync::Mutex<Vec<runtime::JoinHandle<()>>>,
+    terminal: Arc<Mutex<Option<error::Error>>>,
 }
 impl Driver {
     pub fn is_closed(&self) -> bool {
         self.stop.is_cancelled() || self.tx.is_closed()
     }
     pub fn send(&self, bytes: Bytes) -> Result<(), error::Error> {
-        self.tx.try_send(bytes).map_err(|_| {
-            error::Error::Limited("SFTP pending output queue is full or closed".into())
+        // Serialize admission with publishing termination. A successful enqueue
+        // may already have reached the wire; a refused enqueue never has.
+        let terminal = self.terminal.lock().unwrap();
+        if let Some(error) = &*terminal {
+            return Err(error::Error::NotSent(Arc::new(error.clone())));
+        }
+        self.tx.try_send(bytes).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                error::Error::Limited("SFTP pending output queue is full".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                error::Error::NotSent(Arc::new(error::Error::Closed))
+            }
         })
     }
     pub fn close(&self) {
+        self.terminal
+            .lock()
+            .unwrap()
+            .get_or_insert(error::Error::Closed);
         self.stop.cancel();
     }
     pub async fn shutdown(&self) {
@@ -134,23 +151,28 @@ where
     let rc = CancellationToken::new();
     let wc = rc.clone();
     let stop = rc.clone();
+    let terminal = Arc::new(Mutex::new(None));
+    let read_terminal = terminal.clone();
+    let write_terminal = terminal.clone();
     let reader = runtime::spawn(async move {
         loop {
             select! {
                 result = process_handler(&mut rd, &mut handler, maximum) => {
-                    match result {
-                        Err(Error::UnexpectedEof) => break,
-                        Err(err) => {
-                            warn!("{}", err);
-                            break;
-                        },
-                        Ok(_) => (),
+                    if let Err(err) = result {
+                        read_terminal.lock().unwrap().get_or_insert(err.into());
+                        break;
                     }
                 },
                 _ = rc.cancelled() => break,
             }
         }
 
+        let error = read_terminal
+            .lock()
+            .unwrap()
+            .get_or_insert(error::Error::Closed)
+            .clone();
+        handler.closed(error);
         rc.cancel();
         debug!("read half of sftp stream ended");
     });
@@ -161,13 +183,15 @@ where
                 data = rx.recv() => {
                     let Some(data) = data else { break; };
                     if data.is_empty() {
-                        select! { _ = wr.shutdown() => {}, _ = wc.cancelled() => {} }
+                        select! { result = wr.shutdown() => {
+                            if let Err(error) = result { write_terminal.lock().unwrap().get_or_insert(error.into()); }
+                        }, _ = wc.cancelled() => {} }
                         break;
                     }
 
                     select! {
                         result = wr.write_all(&data[..]) => if let Err(error) = result {
-                            warn!("{}", error);
+                            write_terminal.lock().unwrap().get_or_insert(error.into());
                             break;
                         },
                         _ = wc.cancelled() => break,
@@ -177,6 +201,10 @@ where
             }
         }
 
+        write_terminal
+            .lock()
+            .unwrap()
+            .get_or_insert(error::Error::Closed);
         wc.cancel();
         debug!("write half of sftp stream ended");
     });
@@ -185,5 +213,6 @@ where
         tx,
         stop,
         tasks: tokio::sync::Mutex::new(vec![reader, writer]),
+        terminal,
     }
 }

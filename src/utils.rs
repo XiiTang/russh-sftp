@@ -13,7 +13,12 @@ pub(crate) async fn read_packet<S: AsyncRead + Unpin>(
     stream: &mut S,
     max_length: u32,
 ) -> Result<Bytes, Error> {
-    let length = stream.read_u32().await?;
+    let mut header = [0; 4];
+    if stream.read(&mut header[..1]).await? == 0 {
+        return Err(Error::UnexpectedEof);
+    }
+    stream.read_exact(&mut header[1..]).await?;
+    let length = u32::from_be_bytes(header);
     if length > max_length {
         return Err(Error::BadMessage("packet length limit exceeded".to_owned()));
     }
