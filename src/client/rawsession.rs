@@ -4,10 +4,10 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     time::Duration,
 };
 use tokio::{
@@ -15,9 +15,9 @@ use tokio::{
     sync::oneshot,
 };
 
-use super::{error::Error, runtime, Handler};
+use super::{Handler, error::Error, runtime};
 use crate::{
-    client::{run_with_config, Config},
+    client::{Config, run_with_config},
     de,
     extensions::{
         self, ExpandPathExtension, FsyncExtension, HardlinkExtension, LimitsExtension, Statvfs,
@@ -33,6 +33,18 @@ use crate::{
 
 pub type SftpResult<T> = Result<T, Error>;
 type SharedRequests = HashMap<Option<u32>, oneshot::Sender<SftpResult<Packet>>>;
+
+#[derive(Clone, Default)]
+pub struct DispatchTracker(Arc<std::sync::atomic::AtomicBool>);
+tokio::task_local! { static DISPATCH_TRACKER: DispatchTracker; }
+impl DispatchTracker {
+    pub fn dispatched(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+    pub async fn observe<T>(&self, future: impl Future<Output = T>) -> T {
+        DISPATCH_TRACKER.scope(self.clone(), future).await
+    }
+}
 
 pub(crate) struct Request {
     id: Option<u32>,
@@ -293,11 +305,12 @@ impl RawSftpSession {
             dashmap::mapref::entry::Entry::Occupied(_) => {
                 return Err(Error::UnexpectedBehavior(
                     "SFTP request identifier already in use".into(),
-                ))
+                ));
             }
         }
         request.completed = false;
         self.tx.send(bytes)?;
+        let _ = DISPATCH_TRACKER.try_with(|tracker| tracker.0.store(true, Ordering::Release));
 
         Ok(request)
     }
@@ -394,11 +407,7 @@ impl RawSftpSession {
                 && self
                     .handles
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
-                        if h > 0 {
-                            Some(h - 1)
-                        } else {
-                            None
-                        }
+                        if h > 0 { Some(h - 1) } else { None }
                     })
                     .is_err()
             {
