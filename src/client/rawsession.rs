@@ -201,7 +201,7 @@ pub struct RawSftpSession {
     tx: super::Driver,
     requests: Arc<SharedRequests>,
     next_req_id: AtomicU64,
-    handles: AtomicU64,
+    handles: Mutex<std::collections::HashSet<Vec<u8>>>,
     timeout: AtomicU64,
     limits: Limits,
     maximum_packet: u32,
@@ -249,7 +249,7 @@ impl RawSftpSession {
             tx: run_with_config(stream, inner, &cfg),
             requests: req_map,
             next_req_id: AtomicU64::new(1),
-            handles: AtomicU64::new(0),
+            handles: Mutex::new(std::collections::HashSet::new()),
             timeout: AtomicU64::new(cfg.request_timeout_secs),
             limits: Limits::default(),
             maximum_packet: cfg.max_packet_len,
@@ -360,7 +360,7 @@ impl RawSftpSession {
         if self
             .limits
             .open_handles
-            .is_some_and(|h| self.handles.load(Ordering::SeqCst) >= h)
+            .is_some_and(|h| self.handles.lock().unwrap().len() as u64 >= h)
         {
             return Err(Error::Limited("handle limit reached".to_owned()));
         }
@@ -383,7 +383,7 @@ impl RawSftpSession {
             if handle.handle.len() > 256 {
                 return Err(Error::UnexpectedPacket);
             }
-            self.handles.fetch_add(1, Ordering::SeqCst);
+            self.handles.lock().unwrap().insert(handle.handle.clone());
         }
 
         into_with_status!(result, Handle)
@@ -396,15 +396,22 @@ impl RawSftpSession {
 
     /// Sends a close packet without awaiting the server's acknowledgement.
     pub(crate) fn close_nowait(&self, handle: Vec<u8>) -> SftpResult<Request> {
-        let id = self.use_next_id()?;
-        let request = self.send(Some(id), Close { id, handle }.into())?;
-        if self
-            .handles
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| h.checked_sub(1))
-            .is_err()
-        {
-            warn!("attempt to close more handles than exist");
+        // Admission is synchronous. Keep the handle until it succeeds and
+        // serialize repeated closes so neither can release a sibling's slot.
+        let mut handles = self.handles.lock().unwrap();
+        if !handles.contains(&handle) {
+            return Err(Error::UnexpectedBehavior("SFTP handle is not open".into()));
         }
+        let id = self.use_next_id()?;
+        let request = self.send(
+            Some(id),
+            Close {
+                id,
+                handle: handle.clone(),
+            }
+            .into(),
+        )?;
+        handles.remove(&handle);
         Ok(request)
     }
 
@@ -590,7 +597,7 @@ impl RawSftpSession {
         if self
             .limits
             .open_handles
-            .is_some_and(|h| self.handles.load(Ordering::SeqCst) >= h)
+            .is_some_and(|h| self.handles.lock().unwrap().len() as u64 >= h)
         {
             return Err(Error::Limited("Handle limit reached".to_owned()));
         }
@@ -611,7 +618,7 @@ impl RawSftpSession {
             if handle.handle.len() > 256 {
                 return Err(Error::UnexpectedPacket);
             }
-            self.handles.fetch_add(1, Ordering::SeqCst);
+            self.handles.lock().unwrap().insert(handle.handle.clone());
         }
 
         into_with_status!(result, Handle)
