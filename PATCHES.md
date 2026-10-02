@@ -29,3 +29,16 @@ receive `sender dropped` instead of the actual transport or codec failure.
 write failure, codec/truncation errors, subsequent requests, queue full/closed,
 blocked shutdown and duplicate initialization. `tests/runtime_contract.rs` retains
 wire and lifecycle regressions. No automatic retry, reconnect or replay is added.
+
+## CLOSE ownership (2026-10-02)
+
+Adapt upstream 9ec98bd0920b9b4eceeee3f3ed6e18b479b2d417: retire an open handle
+after synchronous CLOSE queue admission, rather than waiting for STATUS OK.
+Refused admission preserves ownership. A lost/error reply does not authorize
+reuse or retry of that handle. Track the actual opaque byte handles so repeated
+CLOSE cannot decrement a sibling's count; unknown/closed handles are refused
+locally. File shutdown marks an admitted close once, even if its waiter is
+cancelled. Preserve bounded framing, request IDs and joined transport shutdown.
+
+`cargo test` passes on macOS arm64, including queue refusal, cancelled waiter,
+error reply and duplicate-close accounting plus terminal/codec regressions.

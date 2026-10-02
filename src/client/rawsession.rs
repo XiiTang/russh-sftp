@@ -935,3 +935,71 @@ fn decode_extension<T: serde::de::DeserializeOwned>(data: Vec<u8>) -> SftpResult
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod close_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn admitted_close_releases_only_its_handle_even_if_cancelled() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session
+            .handles
+            .lock()
+            .unwrap()
+            .extend([vec![0, 255], vec![1]]);
+        let request = session.close_nowait(vec![0, 255]).unwrap();
+        assert_eq!(session.handles.lock().unwrap().len(), 1);
+        drop(request);
+        assert!(session.close_nowait(vec![0, 255]).is_err());
+        assert!(session.handles.lock().unwrap().contains(&vec![1]));
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn refused_close_keeps_handle_and_request_registration_is_removed() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session.handles.lock().unwrap().insert(vec![0, 255]);
+        // No await: the writer cannot drain this bounded output queue.
+        for _ in 0..32 {
+            session.tx.send(Bytes::from_static(b"queued")).unwrap();
+        }
+        assert!(matches!(
+            session.close_nowait(vec![0, 255]),
+            Err(Error::Limited(_))
+        ));
+        assert_eq!(session.handles.lock().unwrap().len(), 1);
+        assert!(session.requests.is_empty());
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_close_reply_does_not_restore_an_invalid_handle() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session.handles.lock().unwrap().insert(vec![128]);
+        let request = session.close_nowait(vec![128]).unwrap();
+        let id = request.id.unwrap();
+        let (_, reply) = session.requests.remove(&Some(id)).unwrap();
+        reply
+            .send(Ok(Packet::status(
+                id,
+                StatusCode::Failure,
+                "close failed",
+                "",
+            )))
+            .unwrap();
+        let result = request.await.unwrap();
+        assert!(matches!(
+            result,
+            Packet::Status(Status {
+                status_code: StatusCode::Failure,
+                ..
+            })
+        ));
+        assert!(session.handles.lock().unwrap().is_empty());
+        session.shutdown().await;
+    }
+}
