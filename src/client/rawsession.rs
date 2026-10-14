@@ -34,18 +34,6 @@ use crate::{
 pub type SftpResult<T> = Result<T, Error>;
 type SharedRequests = HashMap<Option<u32>, oneshot::Sender<SftpResult<Packet>>>;
 
-#[derive(Clone, Default)]
-pub struct DispatchTracker(Arc<std::sync::atomic::AtomicBool>);
-tokio::task_local! { static DISPATCH_TRACKER: DispatchTracker; }
-impl DispatchTracker {
-    pub fn dispatched(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-    pub async fn observe<T>(&self, future: impl Future<Output = T>) -> T {
-        DISPATCH_TRACKER.scope(self.clone(), future).await
-    }
-}
-
 pub(crate) struct Request {
     id: Option<u32>,
     requests: Arc<SharedRequests>,
@@ -310,7 +298,6 @@ impl RawSftpSession {
         }
         request.completed = false;
         self.tx.send(bytes)?;
-        let _ = DISPATCH_TRACKER.try_with(|tracker| tracker.0.store(true, Ordering::Release));
 
         Ok(request)
     }

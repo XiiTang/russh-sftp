@@ -18,7 +18,10 @@ receive `sender dropped` instead of the actual transport or codec failure.
   never replaces an already recorded cause.
 - Serialize output admission with terminal publication. Distinguish a full queue
   from an ended transport; `NotSent` wraps the retained cause for refused output.
-  Already admitted requests retain an unknown wire outcome.
+  Already admitted requests retain an unknown wire outcome. The unused
+  task-local `DispatchTracker` and its enqueue probe were removed: neither
+  Boundless nor other fork code used them. Queue admission, request ownership
+  and per-handle CLOSE accounting remain unchanged.
 - Pending requests all receive the first cause; subsequent requests are refused
   with that cause. Rejecting a duplicate request ID does not remove its original
   waiter. Request cancellation still removes only its own pending entry.
@@ -42,3 +45,7 @@ cancelled. Preserve bounded framing, request IDs and joined transport shutdown.
 
 `cargo test` passes on macOS arm64, including queue refusal, cancelled waiter,
 error reply and duplicate-close accounting plus terminal/codec regressions.
+
+After removing the unused tracker, `cargo +1.97.0 test --lib close`
+(3 tests) and `cargo +1.97.0 test --test runtime_contract --test terminal_errors`
+(9 tests) pass on macOS arm64.
