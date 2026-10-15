@@ -4,10 +4,10 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -15,9 +15,9 @@ use tokio::{
     sync::oneshot,
 };
 
-use super::{Handler, error::Error, runtime};
+use super::{error::Error, runtime, Handler};
 use crate::{
-    client::{Config, run_with_config},
+    client::{run_with_config, Config},
     de,
     extensions::{
         self, ExpandPathExtension, FsyncExtension, HardlinkExtension, LimitsExtension, Statvfs,
@@ -34,7 +34,10 @@ use crate::{
 pub type SftpResult<T> = Result<T, Error>;
 type SharedRequests = HashMap<Option<u32>, oneshot::Sender<SftpResult<Packet>>>;
 
-pub(crate) struct Request {
+/// An admitted request whose response remains owned until this future is awaited or dropped.
+/// Dropping it cancels only response observation; it never retries the request.
+#[must_use = "await the request to observe its acknowledgement"]
+pub struct Request {
     id: Option<u32>,
     requests: Arc<SharedRequests>,
     response: oneshot::Receiver<SftpResult<Packet>>,
@@ -377,12 +380,17 @@ impl RawSftpSession {
     }
 
     pub async fn close<H: Into<Vec<u8>>>(&self, handle: H) -> SftpResult<Status> {
-        let result = self.close_nowait(handle.into())?.await?;
+        let result = self.close_submit(handle.into())?.await?;
         into_status!(result)
     }
 
-    /// Sends a close packet without awaiting the server's acknowledgement.
-    pub(crate) fn close_nowait(&self, handle: Vec<u8>) -> SftpResult<Request> {
+    /// Submit CLOSE synchronously, returning ownership of the pending reply.
+    ///
+    /// On success the handle is retired before this method returns, even if the
+    /// reply future is later cancelled or the peer rejects CLOSE. On synchronous
+    /// refusal the handle stays open. The future returns the original packet;
+    /// callers must inspect its STATUS code, as `close` does.
+    pub fn close_submit(&self, handle: Vec<u8>) -> SftpResult<Request> {
         // Admission is synchronous. Keep the handle until it succeeds and
         // serialize repeated closes so neither can release a sibling's slot.
         let mut handles = self.handles.lock().unwrap();
@@ -936,10 +944,10 @@ mod close_admission_tests {
             .lock()
             .unwrap()
             .extend([vec![0, 255], vec![1]]);
-        let request = session.close_nowait(vec![0, 255]).unwrap();
+        let request = session.close_submit(vec![0, 255]).unwrap();
         assert_eq!(session.handles.lock().unwrap().len(), 1);
         drop(request);
-        assert!(session.close_nowait(vec![0, 255]).is_err());
+        assert!(session.close_submit(vec![0, 255]).is_err());
         assert!(session.handles.lock().unwrap().contains(&vec![1]));
         session.shutdown().await;
     }
@@ -954,7 +962,7 @@ mod close_admission_tests {
             session.tx.send(Bytes::from_static(b"queued")).unwrap();
         }
         assert!(matches!(
-            session.close_nowait(vec![0, 255]),
+            session.close_submit(vec![0, 255]),
             Err(Error::Limited(_))
         ));
         assert_eq!(session.handles.lock().unwrap().len(), 1);
@@ -967,7 +975,7 @@ mod close_admission_tests {
         let (client, _peer) = tokio::io::duplex(1);
         let session = RawSftpSession::new(client);
         session.handles.lock().unwrap().insert(vec![128]);
-        let request = session.close_nowait(vec![128]).unwrap();
+        let request = session.close_submit(vec![128]).unwrap();
         let id = request.id.unwrap();
         let (_, reply) = session.requests.remove(&Some(id)).unwrap();
         reply

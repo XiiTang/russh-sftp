@@ -4,17 +4,17 @@ use std::{
     io::{self, SeekFrom},
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use super::Metadata;
 use crate::{
     client::{
-        RawSftpSession,
         error::Error,
         rawsession::{Request, SftpResult},
         session::Features,
+        RawSftpSession,
     },
     protocol::{Packet, StatusCode},
 };
@@ -275,7 +275,7 @@ impl Drop for File {
             return;
         }
 
-        let _ = self.session.close_nowait(std::mem::take(&mut self.handle));
+        let _ = self.session.close_submit(std::mem::take(&mut self.handle));
     }
 }
 
@@ -287,11 +287,10 @@ impl AsyncRead for File {
     ) -> Poll<io::Result<()>> {
         let file = self.get_mut();
         let len =
-            ready!(
-                file.state
-                    .read
-                    .poll_read(cx, buf, &file.session, &file.handle, file.features,)
-            )?;
+            ready!(file
+                .state
+                .read
+                .poll_read(cx, buf, &file.session, &file.handle, file.features,))?;
         file.pos += len as u64;
         Poll::Ready(Ok(()))
     }
@@ -463,7 +462,7 @@ impl AsyncWrite for File {
 
                 let request = self
                     .session
-                    .close_nowait(self.handle.clone())
+                    .close_submit(self.handle.clone())
                     .map_err(io::Error::from)?;
                 // The handle is invalid once CLOSE is sent, even if its reply is lost.
                 self.closed = true;

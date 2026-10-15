@@ -49,3 +49,23 @@ error reply and duplicate-close accounting plus terminal/codec regressions.
 After removing the unused tracker, `cargo +1.97.0 test --lib close`
 (3 tests) and `cargo +1.97.0 test --test runtime_contract --test terminal_errors`
 (9 tests) pass on macOS arm64.
+
+## Expose synchronous CLOSE submission (#63, batch 2)
+
+`RawSftpSession::close_submit(&self, handle: Vec<u8>) -> SftpResult<Request>`
+exposes the existing single CLOSE admission checkpoint. The public `Request`
+future owns the pending ACK and returns `SftpResult<Packet>`; STATUS packets
+must be inspected for success or failure. `close` and file shutdown use the
+same checkpoint. Refused admission preserves the handle; admitted CLOSE retires
+it synchronously, regardless of cancelled observation or a failed STATUS. No
+retry is introduced. The existing upstream CLOSE path and Tokio's synchronous
+`mpsc::Sender::try_send` admission were inspected.
+
+Regression: `cargo test --locked --test close_submit --lib close` passes
+(4 tests, exit 0) on macOS arm64. On the unchanged fork the public regression
+fails to compile because `Request` is private and `close_submit` absent (exit
+101). The peer holds back STATUS until the retained request is observed pending,
+then sends a failure; a sibling handle still completes FSTAT. Unit regressions
+cover full-queue refusal, cancelled observation and failed STATUS accounting.
+`cargo test --locked --test runtime_contract --test terminal_errors` also passes
+(9 tests, exit 0).
