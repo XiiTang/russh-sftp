@@ -328,8 +328,8 @@ impl RawSftpSession {
         Ok(())
     }
     /// Cancel both transport halves and wait until they have released the stream.
-    pub async fn shutdown(&self) {
-        self.tx.shutdown().await;
+    pub async fn shutdown(&self) -> Vec<Error> {
+        self.tx.shutdown().await
     }
 
     pub async fn init(&self) -> SftpResult<Version> {
@@ -996,5 +996,30 @@ mod close_admission_tests {
         ));
         assert!(session.handles.lock().unwrap().is_empty());
         session.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod shutdown_forward_tests {
+    use super::*;
+    #[tokio::test]
+    async fn raw_session_forwards_task_failures_without_changing_the_terminal_cause() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session
+            .tx
+            .tasks
+            .lock()
+            .await
+            .handles
+            .push(runtime::spawn(async { panic!("additional child failed") }));
+        *session.tx.terminal.lock().unwrap() = Some(Error::UnexpectedPacket);
+        let failures: Vec<Error> = session.shutdown().await;
+        assert_eq!(failures.len(), 1);
+        assert!(matches!(failures[0], Error::IO(_)));
+        assert!(matches!(
+            *session.tx.terminal.lock().unwrap(),
+            Some(Error::UnexpectedPacket)
+        ));
     }
 }

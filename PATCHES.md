@@ -69,3 +69,23 @@ then sends a failure; a sibling handle still completes FSTAT. Unit regressions
 cover full-queue refusal, cancelled observation and failed STATUS accounting.
 `cargo test --locked --test runtime_contract --test terminal_errors` also passes
 (9 tests, exit 0).
+
+## Read every SFTP transport task end (#63, batch 4)
+
+`Driver::shutdown(&self) -> Vec<client::error::Error>` now joins every task and
+returns its task failures, forwarded by `RawSftpSession::shutdown`. The one
+checkpoint is the private mutex-protected TaskState: a handle stays there until
+its join finishes, and collected errors stay there across a cancelled waiter.
+Every sibling is drained even after a failure; repeated completed shutdown returns
+an empty vector. Join errors use the existing I/O error carrier with their source
+retained; domain failures stay in the original terminal slot and are not added to
+this vector. No replay or new duration is introduced.
+
+Regression: `cargo test --locked --lib shutdown`. The old return type fails the
+new callers to compile (exit 101); the patch passes all 3 tests (exit 0) on macOS
+arm64. They observe both child failures, cancellation while an unjoined child is
+held, retention of an already joined failure for the next waiter, repeated calls,
+RawSftpSession forwarding and preservation of an existing terminal domain cause.
+The existing transport and CLOSE tests also pass. Tokio's join-handle and
+cancel-safe JoinSet result removal were inspected before choosing the checkpoint.
+

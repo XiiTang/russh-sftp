@@ -95,9 +95,16 @@ where
 pub struct Driver {
     tx: mpsc::Sender<Bytes>,
     stop: CancellationToken,
-    tasks: tokio::sync::Mutex<Vec<runtime::JoinHandle<()>>>,
+    tasks: tokio::sync::Mutex<TaskState>,
     terminal: Arc<Mutex<Option<error::Error>>>,
 }
+#[derive(Default)]
+struct TaskState {
+    handles: Vec<runtime::JoinHandle<()>>,
+    // Retained across cancellation of a waiter that already joined an earlier child.
+    errors: Vec<error::Error>,
+}
+
 impl Driver {
     pub fn is_closed(&self) -> bool {
         self.stop.is_cancelled() || self.tx.is_closed()
@@ -125,11 +132,21 @@ impl Driver {
             .get_or_insert(error::Error::Closed);
         self.stop.cancel();
     }
-    pub async fn shutdown(&self) {
+    /// Stop both halves and read every task failure. A cancelled waiter leaves
+    /// unjoined handles and already collected failures for the next call.
+    pub async fn shutdown(&self) -> Vec<error::Error> {
         self.close();
-        for task in std::mem::take(&mut *self.tasks.lock().await) {
-            let _ = task.await;
+        let mut tasks = self.tasks.lock().await;
+        while let Some(task) = tasks.handles.last_mut() {
+            let end = task.await;
+            tasks.handles.pop();
+            if let Err(error) = end {
+                tasks
+                    .errors
+                    .push(error::Error::IO(Arc::new(std::io::Error::other(error))));
+            }
         }
+        std::mem::take(&mut tasks.errors)
     }
 }
 impl Drop for Driver {
@@ -212,7 +229,73 @@ where
     Driver {
         tx,
         stop,
-        tasks: tokio::sync::Mutex::new(vec![reader, writer]),
+        tasks: tokio::sync::Mutex::new(TaskState {
+            handles: vec![reader, writer],
+            errors: Vec::new(),
+        }),
         terminal,
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use futures::FutureExt;
+
+    fn driver(tasks: Vec<runtime::JoinHandle<()>>) -> Driver {
+        let (tx, _) = mpsc::channel(1);
+        Driver {
+            tx,
+            stop: CancellationToken::new(),
+            tasks: tokio::sync::Mutex::new(TaskState {
+                handles: tasks,
+                errors: Vec::new(),
+            }),
+            terminal: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_every_task_failure_and_repeated_calls_are_clean() {
+        let driver = driver(vec![
+            runtime::spawn(async { panic!("reader task failed") }),
+            runtime::spawn(async { panic!("writer task failed") }),
+        ]);
+        let failures = driver.shutdown().await;
+        assert_eq!(failures.len(), 2);
+        assert!(failures
+            .iter()
+            .all(|error| matches!(error, error::Error::IO(_))));
+        assert!(driver.shutdown().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_keeps_unjoined_tasks_for_the_next_waiter() {
+        let (release, held) = tokio::sync::oneshot::channel();
+        let (panicking, ready) = tokio::sync::oneshot::channel();
+        let failed = runtime::spawn(async move {
+            panicking.send(()).unwrap();
+            panic!("earlier joined task failed");
+        });
+        // On this current-thread runtime the panicking poll finishes before
+        // the signaled test is polled again, so the first join is ready.
+        ready.await.unwrap();
+        let driver = driver(vec![
+            runtime::spawn(async move {
+                held.await.unwrap();
+            }),
+            failed,
+        ]);
+        let mut first = Box::pin(driver.shutdown());
+        assert!(first.as_mut().now_or_never().is_none());
+        drop(first);
+        {
+            let tasks = driver.tasks.lock().await;
+            assert_eq!(tasks.handles.len(), 1);
+            assert_eq!(tasks.errors.len(), 1);
+        }
+        release.send(()).unwrap();
+        assert_eq!(driver.shutdown().await.len(), 1);
+        assert!(driver.tasks.lock().await.handles.is_empty());
     }
 }
