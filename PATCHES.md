@@ -89,3 +89,17 @@ RawSftpSession forwarding and preservation of an existing terminal domain cause.
 The existing transport and CLOSE tests also pass. Tokio's join-handle and
 cancel-safe JoinSet result removal were inspected before choosing the checkpoint.
 
+## Preserve spawned task panic payloads (#63, batch 5)
+
+On native hosts the existing spawn wrapper now retains Tokio's join handle and
+original join error, instead of detaching it and reporting a closed oneshot.
+`JoinError` keeps the actual payload, formats string payloads and exposes Tokio's
+error through `std::error::Error::source`. No spawn or Future result signature
+changes. The WASM path keeps its previous local-spawn mechanism. Upstream's
+wrapper and Tokio's native `JoinError` payload/source implementation were read;
+this uses the runtime's own panic capture instead of another unwind boundary.
+
+Regression: `cargo test --locked --lib panic_tests`. Both tests fail on the original
+wrapper (exit 101) and pass with the patch (2 tests, exit 0) on macOS arm64.
+They cover string and non-string panics, payload ownership until the error is
+dropped, and ordinary task success. WASM was not built or exercised.
