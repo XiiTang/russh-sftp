@@ -27,6 +27,15 @@ pub enum Error {
     UnexpectedBehavior(String),
 }
 
+impl Error {
+    /// Whether the server's stream ended where its next packet would begin:
+    /// the subsystem ended, and no packet it sent was cut or malformed. A
+    /// stream that ends inside a packet is an I/O error instead.
+    pub fn is_stream_end(&self) -> bool {
+        matches!(self, Self::Protocol(cause) if matches!(**cause, error::Error::UnexpectedEof))
+    }
+}
+
 impl From<Status> for Error {
     fn from(status: Status) -> Self {
         Self::Status(status)

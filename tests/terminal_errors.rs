@@ -135,6 +135,7 @@ async fn malformed_and_truncated_responses_retain_the_driver_reason() {
             peer.shutdown().await.unwrap();
         });
         let error = result.unwrap_err();
+        assert!(!error.is_stream_end(), "{wire:?}");
         if wire != [0, 0, 0, 1, 255] {
             assert_eq!(io_cause(&error).kind(), io::ErrorKind::UnexpectedEof);
         } else {
@@ -143,6 +144,23 @@ async fn malformed_and_truncated_responses_retain_the_driver_reason() {
         }
         session.shutdown().await;
     }
+}
+#[tokio::test]
+async fn a_stream_ended_between_packets_is_its_end() {
+    let (stream, mut peer) = tokio::io::duplex(128);
+    let session = RawSftpSession::new(stream);
+    let (result, ()) = tokio::join!(session.init(), async {
+        let length = peer.read_u32().await.unwrap();
+        let mut request = vec![0; length as usize];
+        peer.read_exact(&mut request).await.unwrap();
+        peer.shutdown().await.unwrap();
+    });
+    let error = result.unwrap_err();
+    assert!(error.is_stream_end(), "{error:?}");
+    let later = session.stat("later").await.unwrap_err();
+    assert!(matches!(later, Error::NotSent(_)), "{later:?}");
+    assert!(!later.is_stream_end());
+    session.shutdown().await;
 }
 struct Handler;
 impl client::Handler for Handler {

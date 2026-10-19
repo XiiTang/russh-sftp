@@ -95,3 +95,26 @@ Regression: `cargo +1.97.0 test` passes on macOS arm64 (lib 8, including
 and 5), and `cargo +1.97.0 clippy --all-targets` reports nothing. On the
 unchanged fork the regressions do not compile: `read_submit` and
 `ReadRequest` are absent.
+
+## Expose the stream's end between packets (Boundless #68)
+
+`client::error::Error::is_stream_end(&self) -> bool` says whether the reader
+met the server's stream ending where its next packet would begin: `read_packet`
+reads no byte of a length header, which only that produces
+(`error::Error::UnexpectedEof`, carried as `Error::Protocol`). The crate-level
+error is private, so a caller could not tell that end from a malformed packet,
+which also arrives as `Protocol`. A stream ending inside a packet stays an I/O
+error, and a later refused request stays `NotSent`; neither is a stream end.
+
+Boundless reports such an end as the subsystem's: its connection's published
+end, else `protocol_closed` by the peer, not a malformed reply. OpenSSH's
+`sftp-client.c` and node ssh2's `SFTP.js` also keep the input's end apart from
+a packet they cannot parse.
+
+Regression: `tests/terminal_errors.rs`
+`a_stream_ended_between_packets_is_its_end` (the end, and a later request's
+`NotSent` that is not one) and `malformed_and_truncated_responses_retain_the_driver_reason`
+(neither a malformed nor a truncated reply is a stream end). On the unchanged
+fork they do not compile: `is_stream_end` is absent. `cargo +1.97.0 test`
+passes on macOS arm64 (lib 8; the integration tests 1, 4 and 6), and
+`cargo +1.97.0 clippy --all-targets` reports nothing.
