@@ -218,6 +218,35 @@ macro_rules! into_status {
     };
 }
 
+/// A READ admitted synchronously, whose reply is checked as [`RawSftpSession::read`]
+/// checks it: DATA of at most the requested length, or the server's STATUS as an error.
+/// Dropping it cancels only reply observation; it never retries the request.
+#[must_use = "await the request to observe its reply"]
+pub struct ReadRequest {
+    request: Request,
+    len: u32,
+}
+
+impl Future for ReadRequest {
+    type Output = SftpResult<Data>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let len = self.len;
+        let packet = ready!(Pin::new(&mut self.request).poll(cx))?;
+        Poll::Ready(data_reply(packet, len))
+    }
+}
+
+/// The DATA a READ of `len` bytes answers, or its STATUS as an error.
+fn data_reply(result: Packet, len: u32) -> SftpResult<Data> {
+    if let Packet::Data(data) = &result {
+        if data.data.len() > len as usize {
+            return Err(Error::UnexpectedPacket);
+        }
+    }
+    into_with_status!(result, Data)
+}
+
 impl RawSftpSession {
     pub fn new<S>(stream: S) -> Self
     where
@@ -434,12 +463,22 @@ impl RawSftpSession {
             )
             .await?;
 
-        if let Packet::Data(data) = &result {
-            if data.data.len() > len as usize {
-                return Err(Error::UnexpectedPacket);
-            }
+        data_reply(result, len)
+    }
+
+    /// Submit READ synchronously for a handle this session holds open, returning
+    /// ownership of the pending reply.
+    ///
+    /// Admission shares [`Self::close_submit`]'s handle lock: once CLOSE of a
+    /// handle was admitted, no READ of it is sent. A handle not open, or a refused
+    /// admission, sends nothing and leaves no pending request.
+    pub fn read_submit(&self, handle: &[u8], offset: u64, len: u32) -> SftpResult<ReadRequest> {
+        let handles = self.handles.lock().unwrap();
+        if !handles.contains(handle) {
+            return Err(Error::UnexpectedBehavior("SFTP handle is not open".into()));
         }
-        into_with_status!(result, Data)
+        let request = self.read_nowait(handle, offset, len)?;
+        Ok(ReadRequest { request, len })
     }
 
     pub async fn write<H: Into<Vec<u8>>>(
@@ -967,6 +1006,79 @@ mod close_admission_tests {
         ));
         assert_eq!(session.handles.lock().unwrap().len(), 1);
         assert!(session.requests.is_empty());
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn read_is_admitted_only_for_a_handle_held_open() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        assert!(matches!(
+            session.read_submit(&[7], 0, 4),
+            Err(Error::UnexpectedBehavior(_))
+        ));
+        assert!(session.requests.is_empty());
+        session.handles.lock().unwrap().insert(vec![7]);
+        let read = session.read_submit(&[7], 0, 4).unwrap();
+        assert_eq!(session.requests.len(), 1);
+        drop(read);
+        // Once CLOSE is admitted no READ of the handle is sent.
+        let close = session.close_submit(vec![7]).unwrap();
+        assert!(matches!(
+            session.read_submit(&[7], 0, 4),
+            Err(Error::UnexpectedBehavior(_))
+        ));
+        assert_eq!(session.requests.len(), 1);
+        drop(close);
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn refused_read_admission_leaves_no_pending_request() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session.handles.lock().unwrap().insert(vec![7]);
+        for _ in 0..32 {
+            session.tx.send(Bytes::from_static(b"queued")).unwrap();
+        }
+        assert!(matches!(
+            session.read_submit(&[7], 0, 4),
+            Err(Error::Limited(_))
+        ));
+        assert!(session.requests.is_empty());
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_submitted_read_checks_its_reply_as_read_does() {
+        let (client, _peer) = tokio::io::duplex(1);
+        let session = RawSftpSession::new(client);
+        session.handles.lock().unwrap().insert(vec![7]);
+        let reply = |packet: Packet| {
+            let read = session.read_submit(&[7], 0, 4).unwrap();
+            let id = read.request.id.unwrap();
+            let (_, sender) = session.requests.remove(&Some(id)).unwrap();
+            sender.send(Ok(packet)).unwrap();
+            read
+        };
+        let data = |data: &[u8]| {
+            Packet::Data(Data {
+                id: 0,
+                data: data.to_vec(),
+            })
+        };
+        assert_eq!(reply(data(b"four")).await.unwrap().data, b"four");
+        assert!(matches!(
+            reply(data(b"fives")).await,
+            Err(Error::UnexpectedPacket)
+        ));
+        assert!(matches!(
+            reply(Packet::status(0, StatusCode::Eof, "end", "")).await,
+            Err(Error::Status(Status {
+                status_code: StatusCode::Eof,
+                ..
+            }))
+        ));
         session.shutdown().await;
     }
 

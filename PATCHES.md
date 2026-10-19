@@ -69,3 +69,29 @@ then sends a failure; a sibling handle still completes FSTAT. Unit regressions
 cover full-queue refusal, cancelled observation and failed STATUS accounting.
 `cargo test --locked --test runtime_contract --test terminal_errors` also passes
 (9 tests, exit 0).
+
+## Expose synchronous READ submission (Boundless #68)
+
+`RawSftpSession::read_submit(&self, handle: &[u8], offset: u64, len: u32)
+-> SftpResult<ReadRequest>` admits one READ under the same handle lock
+`close_submit` takes: a handle that is not open, or whose CLOSE was admitted,
+sends nothing (`UnexpectedBehavior`), so CLOSE and READ admission of one handle
+are ordered. The public `ReadRequest` future owns the pending reply and checks
+it as `read` does, through one shared function: DATA of at most `len` bytes,
+`UnexpectedPacket` for more, and a STATUS as `Error::Status`. A refused
+admission (full queue, read limit) leaves no pending request. Dropping the
+future cancels only reply observation; no retry is introduced.
+
+Boundless reads an SFTP file as a body fed one READ at a time: it reserves
+room, submits the READ in a short critical section beside its own handle
+table, and awaits the reply outside it, so other requests run while a read
+waits and a CLOSE it admits stops further READs. Upstream's crate-private
+`read_nowait`, used by `File`, is the admission this wraps.
+
+Regression: `cargo +1.97.0 test` passes on macOS arm64 (lib 8, including
+`read_is_admitted_only_for_a_handle_held_open`,
+`refused_read_admission_leaves_no_pending_request` and
+`a_submitted_read_checks_its_reply_as_read_does`; the integration tests 1, 4
+and 5), and `cargo +1.97.0 clippy --all-targets` reports nothing. On the
+unchanged fork the regressions do not compile: `read_submit` and
+`ReadRequest` are absent.
