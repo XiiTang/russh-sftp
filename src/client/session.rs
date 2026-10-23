@@ -132,10 +132,11 @@ impl SftpSession {
     }
 
     /// Requests the remote party for the absolute from the relative path.
+    /// Non-UTF-8 names use replacement characters; RawSftpSession retains the octets.
     pub async fn canonicalize<T: Into<String>>(&self, path: T) -> SftpResult<String> {
         let name = self.session.realpath(path).await?;
         match name.files.first() {
-            Some(file) => Ok(file.filename.to_owned()),
+            Some(file) => Ok(String::from_utf8_lossy(&file.filename).into_owned()),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
         }
     }
@@ -177,6 +178,7 @@ impl SftpSession {
     }
 
     /// Returns an iterator over the entries within a directory.
+    /// Non-UTF-8 names use replacement characters; RawSftpSession retains the octets.
     pub async fn read_dir<P: Into<String>>(&self, path: P) -> SftpResult<ReadDir> {
         let path: String = path.into();
         let parent = Arc::from(path.as_str());
@@ -190,7 +192,7 @@ impl SftpSession {
                     files = name
                         .files
                         .into_iter()
-                        .map(|f| (f.filename, f.attrs))
+                        .map(|f| (String::from_utf8_lossy(&f.filename).into_owned(), f.attrs))
                         .chain(files)
                         .collect();
                 }
@@ -208,10 +210,11 @@ impl SftpSession {
     }
 
     /// Reads a symbolic link, returning the file that the link points to.
+    /// Non-UTF-8 names use replacement characters; RawSftpSession retains the octets.
     pub async fn read_link<P: Into<String>>(&self, path: P) -> SftpResult<String> {
         let name = self.session.readlink(path).await?;
         match name.files.first() {
-            Some(file) => Ok(file.filename.to_owned()),
+            Some(file) => Ok(String::from_utf8_lossy(&file.filename).into_owned()),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
         }
     }
@@ -285,6 +288,7 @@ impl SftpSession {
     }
 
     /// Expands a `~`/`~user`-prefixed or relative path and returns its canonicalized absolute form.
+    /// Non-UTF-8 names use replacement characters; RawSftpSession retains the octets.
     /// Returns `Ok(None)` if the remote SFTP server does not support `expand-path@openssh.com` extension v1.
     pub async fn expand_path<P: Into<String>>(&self, path: P) -> SftpResult<Option<String>> {
         if !self.features.expand_path {
@@ -293,7 +297,7 @@ impl SftpSession {
 
         let name = self.session.expand_path(path).await?;
         match name.files.first() {
-            Some(file) => Ok(Some(file.filename.to_owned())),
+            Some(file) => Ok(Some(String::from_utf8_lossy(&file.filename).into_owned())),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
         }
     }

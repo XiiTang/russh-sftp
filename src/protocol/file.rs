@@ -5,8 +5,12 @@ use super::FileAttributes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct File {
-    pub filename: String,
-    pub longname: String,
+    /// Filename octets exactly as carried by SSH_FXP_NAME.
+    #[serde(with = "serde_bytes")]
+    pub filename: Vec<u8>,
+    /// Longname octets exactly as carried by SSH_FXP_NAME.
+    #[serde(with = "serde_bytes")]
+    pub longname: Vec<u8>,
     pub attrs: FileAttributes,
 }
 
@@ -14,8 +18,8 @@ impl File {
     /// Omits `longname` and set dummy `attributes`. This is mainly used for [`crate::server::Handler::realpath`] as per the standard
     pub fn dummy<S: Into<String>>(filename: S) -> Self {
         Self {
-            filename: filename.into(),
-            longname: "".to_string(),
+            filename: filename.into().into_bytes(),
+            longname: Vec::new(),
             attrs: FileAttributes::dummy(),
         }
     }
@@ -23,11 +27,11 @@ impl File {
     /// Implies the use of longname
     pub fn new<S: Into<String>>(filename: S, attrs: FileAttributes) -> Self {
         let mut file = Self {
-            filename: filename.into(),
-            longname: "".to_string(),
+            filename: filename.into().into_bytes(),
+            longname: Vec::new(),
             attrs,
         };
-        file.longname = file.longname();
+        file.longname = file.longname().into_bytes();
         file
     }
 
@@ -54,7 +58,7 @@ impl File {
             } else {
                 self.attrs.gid.unwrap_or(0).to_string()
             },
-            self.filename
+            String::from_utf8_lossy(&self.filename)
         )
     }
 }

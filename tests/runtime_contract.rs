@@ -105,3 +105,38 @@ async fn raw_client_rejects_length_before_reading_payload() {
     assert!(result.is_err());
     session.shutdown().await;
 }
+
+/// NAME is decoded from independently assembled octets, including names that
+/// differ only at an invalid UTF-8 byte. Both byte strings must survive.
+#[test]
+fn name_reply_preserves_filename_and_longname_octets() {
+    let mut packet = vec![104, 0, 0, 0, 7];
+    let entries: &[(&[u8], &[u8])] = &[
+        (b"plain", b"a long name"),
+        ("文档".as_bytes(), "目录详情".as_bytes()),
+        (b"a\xff", b"long\x80\x00"),
+        (b"a\xfe", b"long\x81\x00"),
+        (b"", b""),
+    ];
+    packet.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for (filename, longname) in entries {
+        for value in [filename, longname] {
+            packet.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet.extend_from_slice(&0u32.to_be_bytes());
+    }
+    let original = packet.clone();
+    let Packet::Name(name) = Packet::try_from(&mut Bytes::from(packet)).unwrap() else {
+        panic!("expected NAME");
+    };
+    assert_eq!(name.id, 7);
+    assert_eq!(name.files.len(), entries.len());
+    for (file, (filename, longname)) in name.files.iter().zip(entries) {
+        assert_eq!(file.filename, *filename);
+        assert_eq!(file.longname, *longname);
+    }
+    let mut encoded = Bytes::try_from(Packet::Name(name)).unwrap();
+    encoded.advance(4);
+    assert_eq!(encoded.as_ref(), original);
+}

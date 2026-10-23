@@ -118,3 +118,23 @@ Regression: `tests/terminal_errors.rs`
 fork they do not compile: `is_stream_end` is absent. `cargo +1.97.0 test`
 passes on macOS arm64 (lib 8; the integration tests 1, 4 and 6), and
 `cargo +1.97.0 clippy --all-targets` reports nothing.
+
+## Preserve NAME octets (W10-D3)
+
+NAME's `File.filename` and `File.longname` are byte vectors decoded and encoded
+through `serde_bytes`, as opaque handles already are. The NAME codec never
+passes these fields to the lossy string reader. The raw client exposes those
+same fields to READDIR, REALPATH, READLINK and expand-path callers. The high-level
+text convenience API keeps its existing UTF-8 replacement behavior at its own
+conversion; it does not discard octets before a raw client can read them.
+
+Boundless converts these fields directly to its shared `binary::Bytes` boundary.
+The failure was distinct non-UTF-8 filenames collapsing to the same replacement
+text. OpenSSH V_10_0_P1 `sftp-client.c` was inspected: READDIR and
+`sftp_realpath_expand` read filename/longname with `sshbuf_get_cstring`, retaining
+their octets rather than decoding UTF-8.
+
+Regression: `tests/runtime_contract.rs::name_reply_preserves_filename_and_longname_octets`
+decodes an independently assembled NAME packet containing ASCII, UTF-8, invalid
+UTF-8, embedded NUL and empty strings, checks both byte fields, and re-encodes
+exactly the original packet.
